@@ -327,13 +327,14 @@ if not st.session_state.terms_conditions_complete:
             try:
                 if "group" not in st.session_state or "participant_id" not in st.session_state:
                     condition, participant_id = db.get_next_condition()
-                st.session_state.group = condition
-                group = st.session_state.group 
-                st.session_state.participant_id = participant_id
+                    st.session_state.group = condition
+                    st.session_state.participant_id = participant_id
+
+                st.session_state.terms_conditions_complete = True
+                st.rerun()
+
             except Exception as e:
                 st.error(f"Failed to assign participant condition: {e}")
-            st.session_state.terms_conditions_complete = True
-            st.rerun()
     else:
         st.info("Please check the consent box to continue.")
 
@@ -514,7 +515,7 @@ elif st.session_state.current:
         st.markdown(f'<div class="assistant-message">{case["llm_response"]}</div>', unsafe_allow_html=True)
     
     # Group-specific interventions
-    if group == "Group A - Warning Label":
+    if st.session_state.get("group") == "Group A - Warning Label":
         st.warning("⚠️ WARNING: Please check the validity of AI responses")
     
     # Rating widgets
@@ -576,7 +577,7 @@ elif st.session_state.current:
             response_data = {
                 "case_id": case_id,
                 "response_number": st.session_state.response_counter,
-                "group": group,
+                "group": st.session_state.get("group"),
                 "user_age": st.session_state.user_age,
                 "user_profession": st.session_state.user_profession,
                 "user_sex" : st.session_state.user_sex, 
