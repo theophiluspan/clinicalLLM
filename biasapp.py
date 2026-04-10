@@ -193,15 +193,6 @@ if not st.session_state.study_can_accept:
     st.stop()
 
 # Continue with normal initialization if study is accepting participants
-if "group" not in st.session_state or "participant_id" not in st.session_state:
-    try:
-        condition, participant_id = db.get_next_condition()
-        st.session_state.group = condition
-        st.session_state.participant_id = participant_id
-    except Exception as e:
-        st.error(f"Failed to assign participant condition: {e}")
-        st.stop()
-
 if "selected_cases" not in st.session_state:
     st.session_state.selected_cases = []
 
@@ -232,8 +223,6 @@ if "user_sex" not in st.session_state:
 
 if "user_race" not in st.session_state:
     st.session_state.user_race = ""
-
-group = st.session_state.group
 
 def display_instructions():
     st.markdown("""
@@ -335,6 +324,14 @@ if not st.session_state.terms_conditions_complete:
     
     if agree_to_participate:
         if st.button("Continue to Participant Information", type="primary"):
+            try:
+                if "group" not in st.session_state or "participant_id" not in st.session_state:
+                    condition, participant_id = db.get_next_condition()
+                st.session_state.group = condition
+                group = st.session_state.group 
+                st.session_state.participant_id = participant_id
+            except Exception as e:
+                st.error(f"Failed to assign participant condition: {e}")
             st.session_state.terms_conditions_complete = True
             st.rerun()
     else:
