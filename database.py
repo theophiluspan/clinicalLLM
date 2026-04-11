@@ -1,181 +1,138 @@
-# database.py
-"""
-Database module for AI Response Evaluation Survey
-Handles all data persistence, condition assignment, and admin operations
-"""
-
-import sqlite3
-import threading
+import io
 import time
-import pandas as pd
+import threading
 from contextlib import contextmanager
 
+import gspread
+import pandas as pd
+import streamlit as st
+
 db_lock = threading.Lock()
-DB_NAME = "survey_data.db"
 
 
 class SurveyDatabase:
-    def __init__(self, db_name: str = DB_NAME):
-        self.db_name = db_name
-        self.init_database()
+    def __init__(self):
+        self.gc = gspread.service_account_from_dict(st.secrets["gcp_service_account"])
+        self.sheet = self.gc.open(st.secrets["SPREADSHEET_NAME"])
+        self._init_sheet()
 
-    @contextmanager
-    def get_connection(self):
-        with db_lock:
-            conn = sqlite3.connect(self.db_name)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA foreign_keys = ON")
-            try:
-                yield conn
-            finally:
-                conn.close()
+    def _init_sheet(self):
+        self.participants_ws = self._get_or_create_ws(
+            "participants",
+            ["id", "condition", "age", "profession", "sex", "race", "completed", "created_at"],
+        )
+        self.responses_ws = self._get_or_create_ws(
+            "responses",
+            [
+                "id",
+                "participant_id",
+                "case_id",
+                "response_number",
+                "group_condition",
+                "user_age",
+                "user_profession",
+                "user_sex",
+                "user_race",
+                "agree_rating",
+                "trust_rating",
+                "comment",
+                "created_at",
+            ],
+        )
+        self.metadata_ws = self._get_or_create_ws(
+            "metadata",
+            ["key", "value"],
+        )
 
-    def init_database(self):
-        with self.get_connection() as conn:
-            # Participants table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS participants (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    condition TEXT NOT NULL,
-                    age INTEGER,
-                    profession TEXT,
-                    sex TEXT,
-                    race TEXT,
-                    completed BOOLEAN DEFAULT FALSE,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+        metadata = self._read_ws(self.metadata_ws)
+        if metadata.empty:
+            self.metadata_ws.append_rows(
+                [
+                    ["target_participants", "20"],
+                    ["study_active", "true"],
+                ]
+            )
 
-            # Responses table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS responses (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    participant_id INTEGER NOT NULL,
-                    case_id INTEGER,
-                    response_number INTEGER,
-                    group_condition TEXT,
-                    user_age INTEGER,
-                    user_profession TEXT,
-                    user_sex TEXT,
-                    user_race TEXT,
-                    agree_rating TEXT,
-                    trust_rating TEXT,
-                    comment TEXT,
-                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (participant_id) REFERENCES participants(id) ON DELETE CASCADE
-                )
-            """)
+    def _get_or_create_ws(self, title, headers):
+        try:
+            ws = self.sheet.worksheet(title)
+        except gspread.WorksheetNotFound:
+            ws = self.sheet.add_worksheet(title=title, rows=1000, cols=max(10, len(headers)))
+            ws.append_row(headers)
+        return ws
 
-            # Metadata table
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS study_metadata (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                )
-            """)
+    def _read_ws(self, ws):
+        records = ws.get_all_records()
+        return pd.DataFrame(records)
 
-            # Initialize defaults
-            defaults = {
-                "target_participants": "20",
-                "study_active": "true",
-            }
+    def _write_df(self, ws, df):
+        ws.clear()
+        if df.empty:
+            return
+        ws.update([df.columns.tolist()] + df.fillna("").astype(str).values.tolist())
 
-            for key, value in defaults.items():
-                cursor = conn.execute(
-                    "SELECT value FROM study_metadata WHERE key = ?",
-                    (key,)
-                )
-                if cursor.fetchone() is None:
-                    conn.execute(
-                        "INSERT INTO study_metadata (key, value) VALUES (?, ?)",
-                        (key, value)
-                    )
-
-            conn.commit()
-
-    def set_target_participants(self, target: int):
-        with self.get_connection() as conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO study_metadata (key, value)
-                VALUES (?, ?)
-            """, ("target_participants", str(target)))
-            conn.commit()
+    def _next_id(self, df):
+        if df.empty:
+            return 1
+        numeric = pd.to_numeric(df["id"], errors="coerce").dropna()
+        return int(numeric.max()) + 1 if not numeric.empty else 1
 
     def get_target_participants(self) -> int:
-        with self.get_connection() as conn:
-            cursor = conn.execute(
-                'SELECT value FROM study_metadata WHERE key = "target_participants"'
-            )
-            result = cursor.fetchone()
-            return int(result["value"]) if result else 10
+        meta = self._read_ws(self.metadata_ws)
+        row = meta.loc[meta["key"] == "target_participants", "value"]
+        return int(row.iloc[0]) if not row.empty else 20
 
-    def set_study_active(self, active: bool):
-        with self.get_connection() as conn:
-            conn.execute("""
-                INSERT OR REPLACE INTO study_metadata (key, value)
-                VALUES (?, ?)
-            """, ("study_active", "true" if active else "false"))
-            conn.commit()
+    def set_target_participants(self, target: int):
+        meta = self._read_ws(self.metadata_ws)
+        if (meta["key"] == "target_participants").any():
+            meta.loc[meta["key"] == "target_participants", "value"] = str(target)
+        else:
+            meta = pd.concat([meta, pd.DataFrame([{"key": "target_participants", "value": str(target)}])], ignore_index=True)
+        self._write_df(self.metadata_ws, meta)
 
     def can_accept_participants(self) -> bool:
-        with self.get_connection() as conn:
-            cursor = conn.execute("""
-                SELECT
-                    (SELECT value FROM study_metadata WHERE key = 'study_active' LIMIT 1) AS active,
-                    (SELECT value FROM study_metadata WHERE key = 'target_participants' LIMIT 1) AS target,
-                    (SELECT COUNT(*) FROM participants) AS current_count
-            """)
-            result = cursor.fetchone()
+        meta = self._read_ws(self.metadata_ws)
+        participants = self.export_participants()
 
-            active = (result["active"] or "false").lower() == "true"
-            target = int(result["target"]) if result["target"] else 10
-            current = result["current_count"] or 0
+        active_row = meta.loc[meta["key"] == "study_active", "value"]
+        target_row = meta.loc[meta["key"] == "target_participants", "value"]
 
-            return active and current < target
+        active = (active_row.iloc[0].lower() == "true") if not active_row.empty else True
+        target = int(target_row.iloc[0]) if not target_row.empty else 20
+        current = len(participants)
+
+        return active and current < target
 
     def get_condition_counts(self) -> pd.DataFrame:
-        with self.get_connection() as conn:
-            query = """
-                SELECT
-                    condition,
-                    COUNT(*) AS total_participants,
-                    SUM(CASE WHEN completed = 1 THEN 1 ELSE 0 END) AS completed_participants
-                FROM participants
-                GROUP BY condition
-                ORDER BY condition
-            """
-            return pd.read_sql_query(query, conn)
+        participants = self.export_participants()
+        if participants.empty:
+            return pd.DataFrame(columns=["condition", "total_participants", "completed_participants"])
+
+        participants["completed"] = participants["completed"].astype(str).str.lower().isin(["true", "1"])
+        out = (
+            participants.groupby("condition", dropna=False)
+            .agg(
+                total_participants=("id", "count"),
+                completed_participants=("completed", "sum"),
+            )
+            .reset_index()
+            .sort_values("condition")
+        )
+        return out
 
     def get_next_condition(self) -> tuple[str, int]:
-        """
-        Balanced allocation:
-        assigns the participant to the arm with fewer participants,
-        while respecting target split.
-        """
-        if not self.can_accept_participants():
-            raise Exception("Study is not accepting new participants")
+        with db_lock:
+            if not self.can_accept_participants():
+                raise Exception("Study is not accepting new participants")
 
-        # Get target BEFORE acquiring the lock again inside this method
-        target_participants = self.get_target_participants()
+            participants = self.export_participants()
+            target_participants = self.get_target_participants()
 
-        conditions = ["Control", "Group A - Warning Label"]
-
-        with self.get_connection() as conn:
-            cursor = conn.execute("""
-                SELECT condition, COUNT(*) AS count
-                FROM participants
-                GROUP BY condition
-            """)
-            results = cursor.fetchall()
-
-            counts = {row["condition"]: row["count"] for row in results}
-
-            current_control = counts.get("Control", 0)
-            current_warning = counts.get("Group A - Warning Label", 0)
+            current_control = len(participants[participants["condition"] == "Control"]) if not participants.empty else 0
+            current_warning = len(participants[participants["condition"] == "Group A - Warning Label"]) if not participants.empty else 0
 
             base_per_condition = target_participants // 2
             remainder = target_participants % 2
-
             target_control = base_per_condition + remainder
             target_warning = base_per_condition
 
@@ -187,52 +144,39 @@ class SurveyDatabase:
                 condition = "Group A - Warning Label"
             else:
                 total = current_control + current_warning
-                condition = conditions[total % 2]
+                condition = ["Control", "Group A - Warning Label"][total % 2]
 
-            cursor = conn.execute("""
-                INSERT INTO participants (condition)
-                VALUES (?)
-            """, (condition,))
-            participant_id = cursor.lastrowid
-            conn.commit()
-
-            return condition, participant_id
+            new_id = self._next_id(participants if not participants.empty else pd.DataFrame(columns=["id"]))
+            self.participants_ws.append_row(
+                [new_id, condition, "", "", "", "", "False", time.strftime("%Y-%m-%d %H:%M:%S")]
+            )
+            return condition, new_id
 
     def update_participant_info(self, participant_id: int, age: int, profession: str, sex: str, race: str):
-        with self.get_connection() as conn:
-            conn.execute("""
-                UPDATE participants
-                SET age = ?, profession = ?, sex = ?, race = ?
-                WHERE id = ?
-            """, (age, profession, sex, race, participant_id))
-            conn.commit()
+        participants = self.export_participants()
+        if participants.empty:
+            return
+
+        mask = pd.to_numeric(participants["id"], errors="coerce") == participant_id
+        participants.loc[mask, ["age", "profession", "sex", "race"]] = [age, profession, sex, race]
+        self._write_df(self.participants_ws, participants)
 
     def mark_participant_completed(self, participant_id: int):
-        with self.get_connection() as conn:
-            conn.execute("""
-                UPDATE participants
-                SET completed = 1
-                WHERE id = ?
-            """, (participant_id,))
-            conn.commit()
+        participants = self.export_participants()
+        if participants.empty:
+            return
+
+        mask = pd.to_numeric(participants["id"], errors="coerce") == participant_id
+        participants.loc[mask, "completed"] = "True"
+        self._write_df(self.participants_ws, participants)
 
     def save_response(self, participant_id: int, response_data: dict):
-        with self.get_connection() as conn:
-            conn.execute("""
-                INSERT INTO responses (
-                    participant_id,
-                    case_id,
-                    response_number,
-                    group_condition,
-                    user_age,
-                    user_profession,
-                    user_sex,
-                    user_race,
-                    agree_rating,
-                    trust_rating,
-                    comment
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
+        responses = self.export_responses()
+        new_id = self._next_id(responses if not responses.empty else pd.DataFrame(columns=["id"]))
+
+        self.responses_ws.append_row(
+            [
+                new_id,
                 participant_id,
                 response_data["case_id"],
                 response_data["response_number"],
@@ -244,129 +188,95 @@ class SurveyDatabase:
                 response_data["agree"],
                 response_data["trust"],
                 response_data["comment"],
-            ))
-            conn.commit()
+                time.strftime("%Y-%m-%d %H:%M:%S"),
+            ]
+        )
 
     def export_participants(self) -> pd.DataFrame:
-        with self.get_connection() as conn:
-            return pd.read_sql_query("SELECT * FROM participants ORDER BY id", conn)
+        return self._read_ws(self.participants_ws)
 
     def export_responses(self) -> pd.DataFrame:
-        with self.get_connection() as conn:
-            return pd.read_sql_query("SELECT * FROM responses ORDER BY participant_id, response_number", conn)
+        return self._read_ws(self.responses_ws)
 
     def export_joined_data(self) -> pd.DataFrame:
-        with self.get_connection() as conn:
-            query = """
-                SELECT
-                    p.id AS participant_id,
-                    p.condition,
-                    p.age,
-                    p.profession,
-                    p.sex,
-                    p.race,
-                    p.completed,
-                    p.created_at AS participant_created_at,
-                    r.id AS response_id,
-                    r.case_id,
-                    r.response_number,
-                    r.agree_rating,
-                    r.trust_rating,
-                    r.comment,
-                    r.created_at AS response_created_at
-                FROM participants p
-                LEFT JOIN responses r
-                    ON p.id = r.participant_id
-                ORDER BY p.id, r.response_number
-            """
-            return pd.read_sql_query(query, conn)
+        participants = self.export_participants()
+        responses = self.export_responses()
+
+        if participants.empty:
+            return pd.DataFrame()
+
+        participants = participants.rename(columns={"id": "participant_id", "created_at": "participant_created_at"})
+        if responses.empty:
+            return participants
+
+        responses = responses.rename(columns={"id": "response_id", "created_at": "response_created_at"})
+        return participants.merge(responses, on="participant_id", how="left")
 
     def get_participant_preview(self) -> pd.DataFrame:
-        with self.get_connection() as conn:
-            query = """
-                SELECT
-                    p.id,
-                    p.condition,
-                    p.age,
-                    p.profession,
-                    p.sex,
-                    p.race,
-                    p.completed,
-                    p.created_at,
-                    COUNT(r.id) AS response_count
-                FROM participants p
-                LEFT JOIN responses r
-                    ON p.id = r.participant_id
-                GROUP BY p.id
-                ORDER BY p.id DESC
-            """
-            return pd.read_sql_query(query, conn)
+        participants = self.export_participants()
+        responses = self.export_responses()
+
+        if participants.empty:
+            return pd.DataFrame()
+
+        if responses.empty:
+            participants["response_count"] = 0
+            return participants.sort_values("id", ascending=False)
+
+        counts = (
+            responses.groupby("participant_id")
+            .size()
+            .reset_index(name="response_count")
+        )
+        participants["id_num"] = pd.to_numeric(participants["id"], errors="coerce")
+        counts["participant_id"] = pd.to_numeric(counts["participant_id"], errors="coerce")
+
+        out = participants.merge(counts, left_on="id_num", right_on="participant_id", how="left")
+        out["response_count"] = out["response_count"].fillna(0).astype(int)
+        return out.drop(columns=["id_num", "participant_id"], errors="ignore").sort_values("id", ascending=False)
 
     def get_response_preview(self, limit: int = 20) -> pd.DataFrame:
-        with self.get_connection() as conn:
-            query = f"""
-                SELECT
-                    r.id,
-                    r.participant_id,
-                    r.case_id,
-                    r.response_number,
-                    r.group_condition,
-                    r.agree_rating,
-                    r.trust_rating,
-                    r.comment,
-                    r.created_at
-                FROM responses r
-                ORDER BY r.id DESC
-                LIMIT {int(limit)}
-            """
-            return pd.read_sql_query(query, conn)
-
-    def delete_participant(self, participant_id: int):
-        with self.get_connection() as conn:
-            conn.execute("DELETE FROM participants WHERE id = ?", (participant_id,))
-            conn.commit()
+        responses = self.export_responses()
+        if responses.empty:
+            return responses
+        return responses.sort_values("id", ascending=False).head(limit)
 
     def delete_selected_participants(self, participant_ids: list[int]):
         if not participant_ids:
             return 0
 
-        placeholders = ",".join(["?"] * len(participant_ids))
-        with self.get_connection() as conn:
-            conn.execute(
-                f"DELETE FROM participants WHERE id IN ({placeholders})",
-                tuple(participant_ids)
-            )
-            conn.commit()
+        participants = self.export_participants()
+        responses = self.export_responses()
+
+        pid_set = set(map(int, participant_ids))
+        participants = participants[~pd.to_numeric(participants["id"], errors="coerce").isin(pid_set)]
+
+        if not responses.empty:
+            responses = responses[~pd.to_numeric(responses["participant_id"], errors="coerce").isin(pid_set)]
+
+        self._write_df(self.participants_ws, participants)
+        self._write_df(self.responses_ws, responses)
         return len(participant_ids)
 
     def backup_all_data(self) -> tuple[str, str]:
         participants_file = f"participants_backup_{int(time.time())}.csv"
         responses_file = f"responses_backup_{int(time.time())}.csv"
-
-        participants_df = self.export_participants()
-        responses_df = self.export_responses()
-
-        participants_df.to_csv(participants_file, index=False)
-        responses_df.to_csv(responses_file, index=False)
-
+        self.export_participants().to_csv(participants_file, index=False)
+        self.export_responses().to_csv(responses_file, index=False)
         return participants_file, responses_file
 
     def delete_all_data(self) -> tuple[str, str]:
-        participants_file, responses_file = self.backup_all_data()
-
-        with self.get_connection() as conn:
-            conn.execute("DELETE FROM responses")
-            conn.execute("DELETE FROM participants")
-            conn.commit()
-
-        return participants_file, responses_file
+        p, r = self.backup_all_data()
+        self._write_df(self.participants_ws, pd.DataFrame(columns=["id", "condition", "age", "profession", "sex", "race", "completed", "created_at"]))
+        self._write_df(self.responses_ws, pd.DataFrame(columns=["id", "participant_id", "case_id", "response_number", "group_condition", "user_age", "user_profession", "user_sex", "user_race", "agree_rating", "trust_rating", "comment", "created_at"]))
+        return p, r
 
 
-def create_database() -> SurveyDatabase:
+def create_database():
     return SurveyDatabase()
 
 
-def get_condition_assignment() -> tuple[str, int]:
+def get_condition_assignment():
     db = create_database()
     return db.get_next_condition()
 

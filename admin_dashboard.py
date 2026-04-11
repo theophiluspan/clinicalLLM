@@ -1,23 +1,11 @@
-# admin_dashboard.py
-"""
-AI Survey Admin Dashboard
-Run with:
-streamlit run admin_dashboard.py --server.port 8502
-"""
-
 import hmac
 import streamlit as st
-import pandas as pd
 from database import create_database
-
-import hmac
-import streamlit as st
 
 st.set_page_config(page_title="Survey Admin Dashboard", layout="wide")
 
 
 def check_password():
-    """Render only the login page until authentication succeeds."""
     if "admin_authenticated" not in st.session_state:
         st.session_state["admin_authenticated"] = False
 
@@ -59,9 +47,6 @@ def logout():
 if not check_password():
     st.stop()
 
-# -----------------------------
-# APP STARTS HERE
-# -----------------------------
 db = create_database()
 
 top_col1, top_col2 = st.columns([6, 1])
@@ -78,12 +63,9 @@ page = st.sidebar.selectbox(
         "📊 Participant Target & Allocation",
         "🗑️ Delete Participant(s)",
         "📤 Export / Backup Data",
-    ]
+    ],
 )
 
-# --------------------------------------------------
-# PARTICIPANT TARGET & ALLOCATION
-# --------------------------------------------------
 if page == "📊 Participant Target & Allocation":
     st.header("Participant Target & Allocation")
 
@@ -92,7 +74,7 @@ if page == "📊 Participant Target & Allocation":
         "Set new target number of participants:",
         min_value=1,
         value=current_target,
-        step=1
+        step=1,
     )
 
     col1, col2 = st.columns([1, 1])
@@ -101,6 +83,7 @@ if page == "📊 Participant Target & Allocation":
         if st.button("Update Target", type="primary"):
             db.set_target_participants(new_target)
             st.success(f"Participant target updated to {new_target}")
+            st.rerun()
 
     with col2:
         study_open = db.can_accept_participants()
@@ -127,9 +110,6 @@ if page == "📊 Participant Target & Allocation":
     else:
         st.dataframe(responses_preview, use_container_width=True, height=300)
 
-# --------------------------------------------------
-# DELETE PARTICIPANTS
-# --------------------------------------------------
 elif page == "🗑️ Delete Participant(s)":
     st.header("Delete Participant(s)")
 
@@ -139,19 +119,14 @@ elif page == "🗑️ Delete Participant(s)":
         st.info("No participants available to delete.")
     else:
         st.write("Select one or more participants to delete. Their linked responses will also be deleted.")
-
         st.dataframe(participants_df, use_container_width=True, height=350)
 
         participant_options = participants_df.apply(
             lambda row: f"ID {row['id']} | {row['condition']} | responses={row['response_count']} | completed={row['completed']}",
-            axis=1
+            axis=1,
         ).tolist()
 
-        selected_labels = st.multiselect(
-            "Select participants to delete:",
-            participant_options
-        )
-
+        selected_labels = st.multiselect("Select participants to delete:", participant_options)
         selected_ids = [int(label.split("|")[0].replace("ID", "").strip()) for label in selected_labels]
 
         if selected_ids:
@@ -164,20 +139,15 @@ elif page == "🗑️ Delete Participant(s)":
 
     st.markdown("---")
     st.subheader("Delete ALL participant and response data")
-
-    st.warning("This will back up all participant and response data, then permanently clear the database tables.")
+    st.warning("This will back up all participant and response data, then permanently clear the Google Sheets tables.")
 
     if st.button("Backup and Delete ALL Data", type="primary"):
         participants_backup, responses_backup = db.delete_all_data()
         st.success(
-            f"All data deleted.\n\n"
-            f"Participants backup: {participants_backup}\n"
-            f"Responses backup: {responses_backup}"
+            f"All data deleted.\n\nParticipants backup: {participants_backup}\nResponses backup: {responses_backup}"
         )
+        st.rerun()
 
-# --------------------------------------------------
-# EXPORT / BACKUP
-# --------------------------------------------------
 elif page == "📤 Export / Backup Data":
     st.header("Export / Backup Data")
 
@@ -198,29 +168,27 @@ elif page == "📤 Export / Backup Data":
         label="Download Participants CSV",
         data=participants_df.to_csv(index=False).encode("utf-8"),
         file_name="participants_data.csv",
-        mime="text/csv"
+        mime="text/csv",
     )
 
     st.download_button(
         label="Download Responses CSV",
         data=responses_df.to_csv(index=False).encode("utf-8"),
         file_name="responses_data.csv",
-        mime="text/csv"
+        mime="text/csv",
     )
 
     st.download_button(
         label="Download Joined CSV",
         data=joined_df.to_csv(index=False).encode("utf-8"),
         file_name="survey_joined_data.csv",
-        mime="text/csv"
+        mime="text/csv",
     )
 
     if st.button("Create Backup Files", type="secondary"):
         participants_backup, responses_backup = db.backup_all_data()
         st.success(
-            f"Backup created successfully.\n\n"
-            f"Participants backup: {participants_backup}\n"
-            f"Responses backup: {responses_backup}"
+            f"Backup created successfully.\n\nParticipants backup: {participants_backup}\nResponses backup: {responses_backup}"
         )
 
 st.markdown("---")
