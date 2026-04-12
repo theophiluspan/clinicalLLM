@@ -428,13 +428,37 @@ elif st.session_state.current:
 
     if not st.session_state[anim_flag]:
         placeholder = st.empty()
-        placeholder.markdown('<div class="assistant-thinking pulse">🤖 Thinking…</div>', unsafe_allow_html=True)
-        time.sleep(0.5)
-        placeholder.markdown(f'<div class="assistant-message">{case["llm_response"]}</div>', unsafe_allow_html=True)
+
+        # Initial thinking animation
+        placeholder.markdown(
+            '<div class="assistant-thinking pulse">🤖 Thinking…</div>',
+            unsafe_allow_html=True
+        )
+        time.sleep(1.2)
+
+        placeholder.markdown(
+            '<div class="assistant-thinking">🛠️ Finishing reasoning…</div>',
+            unsafe_allow_html=True
+        )
+        time.sleep(0.8)
+
+        # Type out the response gradually
+        ai_typed = ""
+        for ch in case["llm_response"]:
+            ai_typed += ch
+            placeholder.markdown(
+                f'<div class="assistant-message">{ai_typed}</div>',
+                unsafe_allow_html=True
+            )
+            time.sleep(0.015)
+
         st.session_state[anim_flag] = True
     else:
-        st.markdown(f'<div class="assistant-message">{case["llm_response"]}</div>', unsafe_allow_html=True)
-
+        st.markdown(
+            f'<div class="assistant-message">{case["llm_response"]}</div>',
+            unsafe_allow_html=True
+        )
+        
     if st.session_state.get("group") == "Group A - Warning Label":
         st.warning("⚠️ WARNING: Please check the validity of AI responses")
 
