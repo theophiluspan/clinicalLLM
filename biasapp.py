@@ -450,7 +450,7 @@ elif st.session_state.current:
                 f'<div class="assistant-message">{ai_typed}</div>',
                 unsafe_allow_html=True
             )
-            time.sleep(0.015)
+            time.sleep(0.008)
 
         st.session_state[anim_flag] = True
     else:
